@@ -1,0 +1,251 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN"><html><head>
+<title>CA Chain setup notes</title></head>
+
+<body>
+<h1>CA Chain setup notes</h1>
+
+<h2>Introduction</h2>
+
+<p>This document describes the steps we took to set up a multi-level
+<a href="http://www.openssl.org/">OpenSSL</a>-based Certificate Authority
+for use with <a href="http://www.globus.org/">Globus'</a>
+<a href="http://www.globus.org/security/">GSI</a>.<p>
+
+<p>Our goal was to establish a multi-level CA.  The difference between
+a multi-level CA and a single-level CA is that in a single-level CA,
+the root key is also the signing key for host and user certificates.
+We wanted to establish a root key which we could use to sign (and
+revoke if necessary) several signing keys which will be used for
+different purposes.  So, if a local PKI is represented a tree where
+nodes are keys and edges are certificates, a single-level tree is
+height two and has just one non-leaf node, while our tree is height
+three and has a single root node, and several second level nodes.
+
+<p>For more information on setting up a single-level CA, see the <a
+href="http://www.modssl.org/docs/2.8/ssl_faq.html">mod_ssl FAQ</a>.
+Setting up a CA for GSI is very similar to setting up a CA for
+Apache's <code>mod_ssl</code>.  However, in the multi-level case,
+there are some differences.  Specifically, Apache
+w/<code>mod_ssl</code> doesn't care if the signing keys do not have
+the "CA:TRUE" bit set, while GSI does.
+
+<h2>Customize the configuration file for easy data entry</h2>
+
+<p>While this step isn't strictly necessary for the following process,
+doing it makes subsequent steps a bit easier, and increases the
+chances of getting things right, and consistent.
+
+Make a copy of the <a href="http://cvs.openssl.org/getfile?f=openssl/apps/openssl.cnf"><code>openssl.cnf</code></a> 
+file, and change the defaults to suit your installation.  Scroll
+to the section labeled <code>[&nbsp;req_distinguished_name&nbsp;]</code> and
+change the lines with the suffix <code>_default</code>.
+
+For example, our altered section reads as follows:
+<pre>[ req_distinguished_name ]              
+countryName                     = Country Name (2 letter code)
+countryName_default             = US
+countryName_min                 = 2
+countryName_max                 = 2
+
+stateOrProvinceName             = State or Province Name (full name)
+stateOrProvinceName_default     = Wisconsin
+
+localityName                    = Locality Name (eg, city)
+localityName_default            = Madison
+
+0.organizationName              = Organization Name (eg, company)
+0.organizationName_default      = University of Wisconsin -- Madison
+
+1.organizationName              = Second Organization Name (eg, company)
+1.organizationName_default      = Computer Sciences Department
+
+organizationalUnitName          = Organizational Unit Name (eg, section)
+organizationalUnitName_default  = Condor Project
+
+commonName                      = Common Name (eg, YOUR name)
+commonName_max                  = 64
+
+emailAddress                    = Email Address
+emailAddress_max                = 40
+</pre>
+
+<h2>Policy</h2>
+<p>For now we ignore the certificate revocation issues.
+</p><p>
+The key size must be determined: we used 1024 bits.
+</p><p>
+Two periods must be determined: the validity period of the root
+certificate, and the validity period of the signing certificate.  For
+the first pass at the CA, we used twenty years (7300 days) for the
+former, and three years (1095 days) for the latter.  Ten years (3650 days) 
+may be more reasonable for the root key.
+</p><p>
+The security of the root key is critical, because it is so long lived,
+and because it can be used to revoke the signing key if necessary.
+So, we established the policy that the root key is never stored or
+decrypted on a machine which has an active network connection.  I turn
+off my laptop's wireless connection, create the key, create a cd with
+just the key on it, burn the cd, and remove the key from the laptop.
+In the openssl directory, the key is a link to the cd filesystem.
+When I need to create a signing key, I turn off the network
+connection, put in the CD, create the key, eject the CD, then turn on
+the network connection.
+</p><p>
+There are two people who have copies of the root key CD and know the
+password.
+</p>
+<h2>Create the CA root key and self-signed certificate</h2>
+
+<h4>Create the keypair:</h4>
+<p>
+<code><b>openssl genrsa -des3 -out root-ca.key 1024</b></code>
+
+<p>You will be asked for a password which will be the CA password, and
+then you'll be asked for that password again.  The output of this
+command, the file <code><b>root-ca.key</b></code>, contains an RSA keypair which
+is encryped using the password you supply.  So, for someone to use
+this key to create new certificates (either host or client), they'll
+need both this file and the password.</p>
+
+<h4>Use the key to sign itself:</h4>
+<p>
+<code><b>openssl req -new -x509 -days 3650 -key root-ca.key -out root-ca.crt \<br>
+&nbsp;&nbsp;&nbsp;&nbsp; -config openssl.cnf</b></code>
+
+<p>This reads, "create a new, self-signed X.509 certificate valid for
+ten years, for the keypair in the file <code>root-ca.key</code>, and place
+the output in the file <code>root-ca.crt</code>."
+
+<p>You will be prompted to input identifying information for the
+certificate.  It's important not to use single quotes in the responses
+due to a quirk in the Globus implementation: for example don't use a
+Common Name such as "<code><b>Alice's CA</b></code>".  If you have
+customized the configuration file as suggested above, the defaults you
+specified there will make this step easier.  The <code>openssl req</code>
+command recognizes that the request is for a self signed certificate, and 
+automatically applies suitable options, such as setting the "CA:TRUE" bit.</p>
+
+<p>
+Don't use an email address.  This avoids 
+<a href="http://www-unix.globus.org/mail_archive/discuss/2004/01/msg00354.html">this 
+interaction bug</a>
+in signing policy files.
+
+<h2>Preparing a directory structure for the root CA</h2>
+
+In order to make use of two different CAs (<i>i.e.</i>, our root
+CA in addition to our signing CA), OpenSSL needs either two
+<code>openssl.cnf</code> files, or one with multiple CA sections.
+We'll take the latter approach. 
+<!-- Here's the <a
+href="openssl.cnf.orig.html">original <code>openssl.cnf</code></a>
+file (extracted from OpenSSL , our <a href="openssl.cnf.html">modified replacement</a>, and
+a <a href="openssl.cnf.diff.html">diff</a>.  
+-->  Here's our <a href="openssl.cnf.html">modified replacement</a>.
+Basically what we do
+is to copy the entire section marked CA_default to a section labeled
+CA_root, and specify a different directory name for the directory
+where CA files are stored.  Of course, we also need to change the
+names of the files that contain the key and certificate appropriately.
+
+<p>
+The next step in this process is to set up a CA directory for
+the <code>openssl ca</code> command.  Note that the directory contents
+must reflect the settings in the <code>openssl.cnf</code> file just
+created.  This can be done by executing <a
+href="mk_new_ca_dir.html">this perl script</a>, which performs the
+following steps:
+
+<ol>
+<li>Create a directory for the bookkeeping files to reside.
+<li>Create a directory to store information about the certificates created.
+<li>Create and initialize a file that stores a count of the number of certificates created.
+<li>Create and initialize a file that stores a random seed.
+</ol>
+
+In other guides that describe how to sign certificates, these steps
+are performed by the openssl script <code>sign.sh</code>.
+
+<h2>Creating the signing certificates</h2>
+
+Creating the signing certificates is nearly as easy.  The certificates
+must be created with the "CA:TRUE" bit set, as noted above.  First, we
+create the keypair for the signing key.  This is similar to the step
+used to create the keypair for the root key, above.
+
+<p>
+<code><b>openssl genrsa -des3 -out signing-ca-1.key 1024</b></code>
+
+<p>
+Now, instead of creating the request and signing it with the private
+key just created, as is done above, here we create a request in one
+step, and then sign it using the root key in another.  First, we
+create the request.
+ (<a href="http://www-unix.globus.org/mail_archive/discuss/2004/01/msg00354.html">Don't
+use</a> an email address here either.)
+
+<p><code><b>openssl req -new -days 1095 -key signing-ca-1.key -out signing-ca-1.csr \<br>
+&nbsp;&nbsp;&nbsp;&nbsp; -config openssl.cnf</b></code>
+
+<p>
+
+Then, we sign the request, using the "<code>-name</code>" argument to
+specify the section in the altered <code>openssl.cnf</code> file:
+
+<p>
+<code><b>openssl ca -config openssl.cnf -name CA_root -extensions v3_ca \<br>
+&nbsp;&nbsp;&nbsp;&nbsp; -out signing-ca-1.crt -infiles signing-ca-1.csr</b></code>
+
+<h2>Preparing a directory structure for the signing CA</h2>
+
+Now, we can create a directory structure for the signing key, using
+the <a href="mk_new_ca_dir.html">same perl script</a> we used
+to create the root CA directory structure.  This time, we give an
+argument to the script to tell it the name of the directory,
+corresponding to the directory name in the <code>openssl.cnf</code>
+file.
+
+<h2>Generating keys, signing requests, and certificates</h2>
+
+<h3>Users</h3>
+
+User certificates have the user name as the CN, and their email address.
+
+OpenSSL allows you to create a key and a certificate signing request in one step:
+<p>
+<code><b>/usr/bin/openssl req -newkey rsa:1024 -keyout kosart.key \<br>
+&nbsp;&nbsp;&nbsp;&nbsp; -config openssl.cnf -out kosart.req</b></code>
+<p>
+Then sign it, remembering the signing key password:
+<p>
+<code><b>/usr/bin/openssl ca -config openssl.cnf \ <br>
+&nbsp;&nbsp;&nbsp;&nbsp; -out kosart.crt \ <br>
+&nbsp;&nbsp;&nbsp;&nbsp; -infiles kosart.req </b></code>
+
+<h3>Hosts</h3>
+
+Host certificates have the hostname as the CN (this is required for Globus), 
+and the email address of the requester.<p>
+
+<code><b>/usr/bin/openssl req -newkey rsa:1024 \ <br>
+&nbsp;&nbsp;&nbsp;&nbsp; -keyout host_nmi-redhat62-build.key -nodes \ <br>
+&nbsp;&nbsp;&nbsp;&nbsp; -config openssl.cnf -out host_nmi-redhat62-build.req </b></code>
+<p>
+
+<code><b>/usr/bin/openssl ca -config openssl.cnf \<br>
+&nbsp;&nbsp;&nbsp;&nbsp; -out host_nmi-redhat62-build.crt \<br>
+&nbsp;&nbsp;&nbsp;&nbsp; -infiles host_nmi-redhat62-build.req</b></code>
+
+<p>
+There's a <a href="mk_certs.html">perl script</a> for generating certs from 
+an <a href="real_input.txt">input</a> file.
+
+<p>
+Other handy OpenSSL commmand line tools:
+<ul>
+<li>To get a hash:<p><code><b>/usr/bin/openssl x509 -noout -hash -in host.crt</b></code>
+<li>To get a subject:<p><code><b>/usr/bin/openssl x509 -noout -subject -in host.crt</b></code>
+<li>To see the whole cert:<p><code><b>/usr/bin/openssl x509 -noout -text -in host.crt</b></code>
+</ul>
+
+</body></html>
